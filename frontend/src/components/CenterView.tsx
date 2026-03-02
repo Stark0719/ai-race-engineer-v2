@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { OrbitControls } from '@react-three/drei'
+import { OrbitControls, Sky, Environment, ContactShadows, SoftShadows } from '@react-three/drei'
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { useRaceStore } from '../stores/raceStore'
+import { DRS_ZONE_DATA } from '../data/drsZones'
 
 type XY = [number, number]
 
@@ -113,8 +114,35 @@ function buildRacingLine(
   return racing
 }
 
+function useAsphaltTexture() {
+  return useMemo(() => {
+    const size = 512
+    const canvas = document.createElement('canvas')
+    canvas.width = size
+    canvas.height = size
+    const ctx = canvas.getContext('2d')!
+    ctx.fillStyle = '#3a3a3a'
+    ctx.fillRect(0, 0, size, size)
+    const imageData = ctx.getImageData(0, 0, size, size)
+    const d = imageData.data
+    for (let i = 0; i < d.length; i += 4) {
+      const noise = (Math.random() - 0.5) * 30
+      d[i] = Math.max(0, Math.min(255, d[i] + noise))
+      d[i + 1] = Math.max(0, Math.min(255, d[i + 1] + noise))
+      d[i + 2] = Math.max(0, Math.min(255, d[i + 2] + noise))
+    }
+    ctx.putImageData(imageData, 0, 0)
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.wrapS = THREE.RepeatWrapping
+    tex.wrapT = THREE.RepeatWrapping
+    tex.repeat.set(200, 200)
+    return tex
+  }, [])
+}
+
 function TrackSurface() {
   const { currentTrack } = useRaceStore()
+  const asphaltMap = useAsphaltTexture()
 
   const geometry = useMemo(() => {
     if (!currentTrack || !currentTrack.waypoints_xy || currentTrack.waypoints_xy.length < 3) return null
@@ -131,7 +159,6 @@ function TrackSurface() {
       if (ln < 0.01) continue
       const nx = -dy / ln, ny = dx / ln
 
-      // Two triangles per segment
       verts.push(
         ax + nx * W, 0, -(ay + ny * W),
         ax - nx * W, 0, -(ay - ny * W),
@@ -152,7 +179,7 @@ function TrackSurface() {
 
   return (
     <mesh geometry={geometry} receiveShadow>
-      <meshLambertMaterial color="#4a4a4a" />
+      <meshStandardMaterial map={asphaltMap} roughness={0.85} metalness={0} />
     </mesh>
   )
 }
@@ -161,10 +188,67 @@ function TrackKerbs() {
   const { currentTrack } = useRaceStore()
 
   const geometries = useMemo(() => {
-    if (!currentTrack || !currentTrack.waypoints_xy || currentTrack.waypoints_xy.length < 3) return []
-
+    if (!currentTrack?.waypoints_xy || currentTrack.waypoints_xy.length < 3) return []
     const pts = currentTrack.waypoints_xy
     const W = currentTrack.track_width || 12
+    const stripeLen = 3
+    const result: THREE.BufferGeometry[] = []
+
+    for (const side of [1, -1]) {
+      const verts: number[] = []
+      const colors: number[] = []
+      let cumLen = 0
+
+      for (let i = 0; i < pts.length - 1; i++) {
+        const [ax, ay] = pts[i]
+        const [bx, by] = pts[i + 1]
+        const dx = bx - ax, dy = by - ay
+        const segLen = Math.sqrt(dx * dx + dy * dy)
+        if (segLen < 0.01) continue
+        const nx = (-dy / segLen) * side, ny = (dx / segLen) * side
+        verts.push(
+          ax + nx * W, 0.06, -(ay + ny * W),
+          ax + nx * (W + 2), 0.06, -(ay + ny * (W + 2)),
+          bx + nx * W, 0.06, -(by + ny * W),
+          bx + nx * (W + 2), 0.06, -(by + ny * (W + 2)),
+          bx + nx * W, 0.06, -(by + ny * W),
+          ax + nx * (W + 2), 0.06, -(ay + ny * (W + 2)),
+        )
+        const isRed = Math.floor(cumLen / stripeLen) % 2 === 0
+        const r = isRed ? 0.8 : 1.0
+        const g = isRed ? 0.0 : 1.0
+        const b = isRed ? 0.0 : 1.0
+        for (let v = 0; v < 6; v++) colors.push(r, g, b)
+        cumLen += segLen
+      }
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3))
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3))
+      geo.computeVertexNormals()
+      result.push(geo)
+    }
+    return result
+  }, [currentTrack])
+
+  return (
+    <>
+      {geometries.map((geo, i) => (
+        <mesh key={i} geometry={geo}>
+          <meshStandardMaterial vertexColors roughness={0.6} metalness={0} />
+        </mesh>
+      ))}
+    </>
+  )
+}
+
+function WhiteLines() {
+  const { currentTrack } = useRaceStore()
+
+  const geometries = useMemo(() => {
+    if (!currentTrack?.waypoints_xy || currentTrack.waypoints_xy.length < 3) return []
+    const pts = currentTrack.waypoints_xy
+    const W = currentTrack.track_width || 12
+    const lineW = 0.3
     const result: THREE.BufferGeometry[] = []
 
     for (const side of [1, -1]) {
@@ -176,13 +260,125 @@ function TrackKerbs() {
         const ln = Math.sqrt(dx * dx + dy * dy)
         if (ln < 0.01) continue
         const nx = (-dy / ln) * side, ny = (dx / ln) * side
+        const inner = W
+        const outer = W + lineW
         verts.push(
-          ax + nx * W, 0.06, -(ay + ny * W),
-          ax + nx * (W + 2), 0.06, -(ay + ny * (W + 2)),
-          bx + nx * W, 0.06, -(by + ny * W),
-          bx + nx * (W + 2), 0.06, -(by + ny * (W + 2)),
-          bx + nx * W, 0.06, -(by + ny * W),
-          ax + nx * (W + 2), 0.06, -(ay + ny * (W + 2)),
+          ax + nx * inner, 0.03, -(ay + ny * inner),
+          ax + nx * outer, 0.03, -(ay + ny * outer),
+          bx + nx * inner, 0.03, -(by + ny * inner),
+          bx + nx * outer, 0.03, -(by + ny * outer),
+          bx + nx * inner, 0.03, -(by + ny * inner),
+          ax + nx * outer, 0.03, -(ay + ny * outer),
+        )
+      }
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3))
+      geo.computeVertexNormals()
+      result.push(geo)
+    }
+    return result
+  }, [currentTrack])
+
+  if (geometries.length === 0) return null
+
+  return (
+    <>
+      {geometries.map((geo, i) => (
+        <mesh key={i} geometry={geo}>
+          <meshStandardMaterial color="#ffffff" roughness={0.5} metalness={0} />
+        </mesh>
+      ))}
+    </>
+  )
+}
+
+function RunoffAreas() {
+  const { currentTrack } = useRaceStore()
+
+  const { gravelGeos, grassGeos } = useMemo(() => {
+    if (!currentTrack?.waypoints_xy || currentTrack.waypoints_xy.length < 3)
+      return { gravelGeos: [], grassGeos: [] }
+    const pts = currentTrack.waypoints_xy
+    const W = currentTrack.track_width || 12
+    const kerbW = 2
+    const gravelW = 6
+    const grassW = 10
+
+    const buildStrip = (innerOff: number, outerOff: number, y: number) => {
+      const result: THREE.BufferGeometry[] = []
+      for (const side of [1, -1]) {
+        const verts: number[] = []
+        for (let i = 0; i < pts.length - 1; i++) {
+          const [ax, ay] = pts[i]
+          const [bx, by] = pts[i + 1]
+          const dx = bx - ax, dy = by - ay
+          const ln = Math.sqrt(dx * dx + dy * dy)
+          if (ln < 0.01) continue
+          const nx = (-dy / ln) * side, ny = (dx / ln) * side
+          verts.push(
+            ax + nx * (W + innerOff), y, -(ay + ny * (W + innerOff)),
+            ax + nx * (W + outerOff), y, -(ay + ny * (W + outerOff)),
+            bx + nx * (W + innerOff), y, -(by + ny * (W + innerOff)),
+            bx + nx * (W + outerOff), y, -(by + ny * (W + outerOff)),
+            bx + nx * (W + innerOff), y, -(by + ny * (W + innerOff)),
+            ax + nx * (W + outerOff), y, -(ay + ny * (W + outerOff)),
+          )
+        }
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3))
+        geo.computeVertexNormals()
+        result.push(geo)
+      }
+      return result
+    }
+
+    return {
+      gravelGeos: buildStrip(kerbW, kerbW + gravelW, -0.05),
+      grassGeos: buildStrip(kerbW + gravelW, kerbW + gravelW + grassW, -0.1),
+    }
+  }, [currentTrack])
+
+  return (
+    <>
+      {gravelGeos.map((geo, i) => (
+        <mesh key={`gravel-${i}`} geometry={geo} receiveShadow>
+          <meshStandardMaterial color="#c4a862" roughness={1.0} metalness={0} />
+        </mesh>
+      ))}
+      {grassGeos.map((geo, i) => (
+        <mesh key={`grass-${i}`} geometry={geo} receiveShadow>
+          <meshStandardMaterial color="#2d5a1e" roughness={0.95} metalness={0} />
+        </mesh>
+      ))}
+    </>
+  )
+}
+
+function Barriers() {
+  const { currentTrack } = useRaceStore()
+
+  const geometries = useMemo(() => {
+    if (!currentTrack?.waypoints_xy || currentTrack.waypoints_xy.length < 3) return []
+    const pts = currentTrack.waypoints_xy
+    const W = currentTrack.track_width || 12
+    const barrierOffset = W + 2 + 6 + 10
+    const barrierH = 2.5
+    const result: THREE.BufferGeometry[] = []
+
+    for (const side of [1, -1]) {
+      const verts: number[] = []
+      for (let i = 0; i < pts.length - 3; i += 3) {
+        const [ax, ay] = pts[i]
+        const [bx, by] = pts[Math.min(i + 3, pts.length - 1)]
+        const dx = bx - ax, dy = by - ay
+        const ln = Math.sqrt(dx * dx + dy * dy)
+        if (ln < 0.01) continue
+        const nx = (-dy / ln) * side, ny = (dx / ln) * side
+        const x0 = ax + nx * barrierOffset, z0 = -(ay + ny * barrierOffset)
+        const x1 = bx + nx * barrierOffset, z1 = -(by + ny * barrierOffset)
+        verts.push(
+          x0, -0.1, z0,  x1, -0.1, z1,  x0, barrierH, z0,
+          x1, -0.1, z1,  x1, barrierH, z1,  x0, barrierH, z0,
         )
       }
       const geo = new THREE.BufferGeometry()
@@ -196,65 +392,221 @@ function TrackKerbs() {
   return (
     <>
       {geometries.map((geo, i) => (
-        <mesh key={i} geometry={geo}>
-          <meshLambertMaterial color="#cc0000" />
+        <mesh key={`barrier-${i}`} geometry={geo} castShadow receiveShadow>
+          <meshStandardMaterial color="#888888" roughness={0.9} metalness={0.1} />
         </mesh>
       ))}
     </>
   )
 }
 
-function WhiteLines() {
+function PitLane() {
   const { currentTrack } = useRaceStore()
 
-  const points = useMemo(() => {
-    if (!currentTrack || !currentTrack.waypoints_xy || currentTrack.waypoints_xy.length < 3) return { left: [], right: [] }
-
+  const geometry = useMemo(() => {
+    if (!currentTrack?.waypoints_xy || currentTrack.waypoints_xy.length < 30) return null
     const pts = currentTrack.waypoints_xy
     const W = currentTrack.track_width || 12
-    const left: THREE.Vector3[] = []
-    const right: THREE.Vector3[] = []
-
-    for (let i = 0; i < pts.length; i++) {
-      let nx = 0, ny = 0
-      if (i < pts.length - 1) {
-        const dx = pts[i + 1][0] - pts[i][0], dy = pts[i + 1][1] - pts[i][1]
-        const l = Math.sqrt(dx * dx + dy * dy)
-        if (l > 0.01) { nx = -dy / l; ny = dx / l }
-      }
-      left.push(new THREE.Vector3(pts[i][0] + nx * W, 0.1, -(pts[i][1] + ny * W)))
-      right.push(new THREE.Vector3(pts[i][0] - nx * W, 0.1, -(pts[i][1] - ny * W)))
-    }
-    return { left, right }
+    const [x0, y0] = pts[0]
+    const [x1, y1] = pts[Math.min(30, pts.length - 1)]
+    const dx = x1 - x0, dy = y1 - y0
+    const len = Math.sqrt(dx * dx + dy * dy)
+    if (len < 1) return null
+    const fx = dx / len, fy = dy / len
+    const nx = -fy, ny = fx
+    const pitOff = W + 5
+    const pitW = 8
+    const pitLen = Math.min(len * 1.5, 300)
+    const verts = new Float32Array([
+      x0 + nx * pitOff, 0.01, -(y0 + ny * pitOff),
+      x0 + nx * (pitOff + pitW), 0.01, -(y0 + ny * (pitOff + pitW)),
+      x0 + fx * pitLen + nx * pitOff, 0.01, -(y0 + fy * pitLen + ny * pitOff),
+      x0 + nx * (pitOff + pitW), 0.01, -(y0 + ny * (pitOff + pitW)),
+      x0 + fx * pitLen + nx * (pitOff + pitW), 0.01, -(y0 + fy * pitLen + ny * (pitOff + pitW)),
+      x0 + fx * pitLen + nx * pitOff, 0.01, -(y0 + fy * pitLen + ny * pitOff),
+    ])
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(verts, 3))
+    geo.computeVertexNormals()
+    return geo
   }, [currentTrack])
 
-  if (points.left.length === 0) return null
+  if (!geometry) return null
+  return (
+    <mesh geometry={geometry} receiveShadow>
+      <meshStandardMaterial color="#3d3d3d" roughness={0.8} metalness={0} />
+    </mesh>
+  )
+}
+
+function RubberMarks() {
+  const currentTrack = useRaceStore((s) => s.currentTrack)
+  const raceDecision = useRaceStore((s) => s.raceDecision)
+
+  const geometry = useMemo(() => {
+    if (!currentTrack?.waypoints_xy || currentTrack.waypoints_xy.length < 3) return null
+    const mode = (raceDecision?.racing_lines_now?.recommended_line || 'balanced') as
+      'conservative' | 'balanced' | 'late_apex' | 'early_apex' | 'aggressive'
+    const racingPts = buildRacingLine(
+      currentTrack.waypoints_xy,
+      currentTrack.track_width || 12,
+      currentTrack.corners,
+      mode,
+    )
+    const rubW = 1.0
+    const verts: number[] = []
+    for (let i = 0; i < racingPts.length - 1; i++) {
+      const [ax, ay] = racingPts[i]
+      const [bx, by] = racingPts[i + 1]
+      const dx = bx - ax, dy = by - ay
+      const ln = Math.sqrt(dx * dx + dy * dy)
+      if (ln < 0.01) continue
+      const nx = -dy / ln, ny = dx / ln
+      verts.push(
+        ax + nx * rubW, 0.02, -(ay + ny * rubW),
+        ax - nx * rubW, 0.02, -(ay - ny * rubW),
+        bx + nx * rubW, 0.02, -(by + ny * rubW),
+        bx - nx * rubW, 0.02, -(by - ny * rubW),
+        bx + nx * rubW, 0.02, -(by + ny * rubW),
+        ax - nx * rubW, 0.02, -(ay - ny * rubW),
+      )
+    }
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3))
+    geo.computeVertexNormals()
+    return geo
+  }, [currentTrack, raceDecision?.racing_lines_now?.recommended_line])
+
+  if (!geometry) return null
+  return (
+    <mesh geometry={geometry}>
+      <meshStandardMaterial color="#1a1a1a" roughness={0.7} metalness={0} transparent opacity={0.6} />
+    </mesh>
+  )
+}
+
+function DRSZones() {
+  const currentTrack = useRaceStore((s) => s.currentTrack)
+  const selectedTrack = useRaceStore((s) => s.selectedTrack)
+  const telemetry = useRaceStore((s) => s.telemetry)
+
+  const zones = useMemo(() => {
+    if (!selectedTrack) return []
+    return DRS_ZONE_DATA[selectedTrack] || []
+  }, [selectedTrack])
+
+  const stripGeometries = useMemo(() => {
+    if (!currentTrack?.waypoints_xy || currentTrack.waypoints_xy.length < 3 || zones.length === 0) return []
+    const pts = currentTrack.waypoints_xy
+    const W = currentTrack.track_width || 12
+    const n = pts.length - 1
+    const geos: THREE.BufferGeometry[] = []
+
+    for (const zone of zones) {
+      const startIdx = Math.floor(zone.activation * n)
+      const endIdx = Math.floor(zone.end * n)
+      const verts: number[] = []
+      for (let i = startIdx; i < endIdx && i < pts.length - 1; i++) {
+        const [ax, ay] = pts[i]
+        const [bx, by] = pts[i + 1]
+        const dx = bx - ax, dy = by - ay
+        const ln = Math.sqrt(dx * dx + dy * dy)
+        if (ln < 0.01) continue
+        const nx = -dy / ln, ny = dx / ln
+        const hw = W * 0.9
+        verts.push(
+          ax + nx * hw, 0.04, -(ay + ny * hw),
+          ax - nx * hw, 0.04, -(ay - ny * hw),
+          bx + nx * hw, 0.04, -(by + ny * hw),
+          bx - nx * hw, 0.04, -(by - ny * hw),
+          bx + nx * hw, 0.04, -(by + ny * hw),
+          ax - nx * hw, 0.04, -(ay - ny * hw),
+        )
+      }
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3))
+      geo.computeVertexNormals()
+      geos.push(geo)
+    }
+    return geos
+  }, [currentTrack, zones])
+
+  const markerData = useMemo(() => {
+    if (!currentTrack?.waypoints_xy || currentTrack.waypoints_xy.length < 3 || zones.length === 0) return []
+    const pts = currentTrack.waypoints_xy
+    const W = currentTrack.track_width || 12
+    const n = pts.length - 1
+    const markers: { pos: [number, number, number]; color: string }[] = []
+
+    for (const zone of zones) {
+      for (const [frac, color] of [[zone.detection, '#ff8800'], [zone.activation, '#00cc44']] as const) {
+        const idx = Math.min(Math.floor(frac * n), pts.length - 2)
+        const [px, py] = pts[idx]
+        const [bx, by] = pts[idx + 1]
+        const dx = bx - px, dy = by - py
+        const ln = Math.hypot(dx, dy) || 1
+        const nx = (-dy / ln), ny = (dx / ln)
+        markers.push({
+          pos: [px + nx * (W + 4), 1.5, -(py + ny * (W + 4))],
+          color,
+        })
+      }
+    }
+    return markers
+  }, [currentTrack, zones])
+
+  if (stripGeometries.length === 0) return null
+  const drsActive = telemetry?.drs ?? false
 
   return (
     <>
-      <line>
-        <bufferGeometry>
-          <bufferAttribute
-            attach="attributes-position"
-            count={points.left.length}
-            array={new Float32Array(points.left.flatMap(p => [p.x, p.y, p.z]))}
-            itemSize={3}
+      {stripGeometries.map((geo, i) => (
+        <mesh key={`drs-strip-${i}`} geometry={geo}>
+          <meshStandardMaterial
+            color={drsActive ? '#00ff88' : '#00cc44'}
+            transparent
+            opacity={drsActive ? 0.45 : 0.25}
+            roughness={0.9}
+            metalness={0}
+            depthWrite={false}
           />
-        </bufferGeometry>
-        <lineBasicMaterial color="white" />
-      </line>
-      <line>
-        <bufferGeometry>
-          <bufferAttribute
-            attach="attributes-position"
-            count={points.right.length}
-            array={new Float32Array(points.right.flatMap(p => [p.x, p.y, p.z]))}
-            itemSize={3}
-          />
-        </bufferGeometry>
-        <lineBasicMaterial color="white" />
-      </line>
+        </mesh>
+      ))}
+      {markerData.map((m, i) => (
+        <group key={`drs-marker-${i}`} position={m.pos}>
+          <mesh>
+            <boxGeometry args={[0.3, 3, 2]} />
+            <meshStandardMaterial color={m.color} roughness={0.5} metalness={0.2} />
+          </mesh>
+          <mesh position={[0, -2, 0]}>
+            <cylinderGeometry args={[0.1, 0.1, 2, 8]} />
+            <meshStandardMaterial color="#666666" roughness={0.8} />
+          </mesh>
+        </group>
+      ))}
     </>
+  )
+}
+
+function CarContactShadow() {
+  const groupRef = useRef<THREE.Group>(null)
+
+  useFrame(() => {
+    if (!groupRef.current || !carState.active) return
+    groupRef.current.position.set(carState.pos.x, 0.01, carState.pos.z)
+  })
+
+  return (
+    <group ref={groupRef}>
+      <ContactShadows
+        opacity={0.6}
+        scale={20}
+        blur={2.5}
+        far={4}
+        resolution={256}
+        color="#000000"
+      />
+    </group>
   )
 }
 
@@ -769,30 +1121,53 @@ export function CenterView() {
         camera={{ position: [0, 30, 50], fov: 55, near: 0.5, far: 12000 }}
         gl={{ antialias: true }}
       >
-        <color attach="background" args={['#1a1a2e']} />
-        <fog attach="fog" args={['#1a1a2e', 800, 5000]} />
+        <Sky
+          distance={450000}
+          sunPosition={[600, 800, 400]}
+          turbidity={8}
+          rayleigh={0.5}
+          mieCoefficient={0.005}
+          mieDirectionalG={0.8}
+        />
+        <Environment preset="sunset" background={false} environmentIntensity={0.4} />
+        <fog attach="fog" args={['#8899bb', 800, 5000]} />
+        <SoftShadows size={25} samples={16} />
 
-        <ambientLight intensity={0.7} />
+        <ambientLight intensity={0.4} />
         <directionalLight
           position={[600, 800, 400]}
-          intensity={1.2}
+          intensity={1.0}
           castShadow
           shadow-mapSize-width={2048}
           shadow-mapSize-height={2048}
+          shadow-bias={-0.0005}
+          shadow-normalBias={0.02}
+          shadow-camera-left={-100}
+          shadow-camera-right={100}
+          shadow-camera-top={100}
+          shadow-camera-bottom={-100}
+          shadow-camera-near={1}
+          shadow-camera-far={2000}
         />
-        <hemisphereLight args={['#4466aa', '#222222', 0.5]} />
+        <hemisphereLight args={['#87ceeb', '#2d5a1e', 0.4]} />
 
         {/* Ground */}
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.5, 0]} receiveShadow>
           <planeGeometry args={[20000, 20000]} />
-          <meshLambertMaterial color="#1a2e1a" />
+          <meshStandardMaterial color="#1a2e1a" roughness={1.0} metalness={0} />
         </mesh>
 
         <TrackSurface />
-        <TrackKerbs />
+        <RubberMarks />
         <WhiteLines />
+        <TrackKerbs />
+        <RunoffAreas />
+        <Barriers />
+        <PitLane />
+        <DRSZones />
         <RacingLine />
         <Car />
+        <CarContactShadow />
         <CameraController />
       </Canvas>
     </div>
