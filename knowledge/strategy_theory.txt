@@ -1,0 +1,14 @@
+Undercut Strategy:
+An undercut occurs when a driver pits earlier than a competitor and uses fresh tyres to gain lap time advantage. It is most effective when tyre degradation is high and pit delta is low.
+
+Overcut Strategy:
+An overcut involves extending a stint while competitors pit. It is effective when tyre degradation is low and track position is valuable.
+
+Safety Car Pit Delta:
+During a safety car period, the time lost during a pit stop is significantly reduced due to slower field pace.
+
+Tyre Warmup:
+New tyres require 1–2 laps to reach optimal operating temperature. Initial laps may be slower.
+
+Tyre Cliff:
+Tyres may experience nonlinear degradation near end of life, resulting in sudden lap time loss.

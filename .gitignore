@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+race_engineer_ai/
+venv/
+.venv/
+
+# Secrets
+.env
+.env.*
+
+# Logs
+logs/
+*.log
+
+# Data and cache
+data/
+cache/
+*.parquet
+*.sqlite
+.chroma/
+
+# Node / Frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
