@@ -11,7 +11,7 @@ import random
 import math
 import numpy as np
 from dataclasses import dataclass
-from backend.simulator.tracks import TrackProfile, TRACKS
+from backend.simulator.tracks.profiles import TrackProfile, TRACKS
 from backend.simulator.config import COMPOUNDS, SimulationConfig
 
 
@@ -126,8 +126,6 @@ class LiveCarSimulator:
     def _rpm(self, s, g): return min(15000, (8000 + s / 350 * 7000) * (1 + (8 - g) * 0.08))
 
     def pit_stop(self, new_compound: str):
-        if new_compound not in COMPOUNDS:
-            raise ValueError(f"Invalid compound: {new_compound}")
         self.pit_history.append({"lap": self.lap_number, "old": self.compound,
                                   "new": new_compound, "age": self.tyre_age_laps})
         self.compound = new_compound

@@ -41,6 +41,22 @@ COMPOUNDS: dict = {
         "cliff_onset": 42,
         "cliff_multiplier": 0.005,
     },
+    "intermediate": {
+        "pace_offset": 0.3,
+        "deg": 0.04,
+        "cliff_onset": 35,
+        "cliff_multiplier": 0.006,
+        "wet_grip_bonus": 0.85,
+        "dry_overheat_penalty": 2.5,
+    },
+    "wet": {
+        "pace_offset": 0.8,
+        "deg": 0.025,
+        "cliff_onset": 45,
+        "cliff_multiplier": 0.004,
+        "wet_grip_bonus": 0.95,
+        "dry_overheat_penalty": 4.0,
+    },
 }
 
 
@@ -100,3 +116,29 @@ class SimulationConfig:
     outlier_quantile: float = 0.90
     min_stint_laps_for_features: int = 8
     warmup_laps_to_discard: int = 2
+
+    # Simulation tick
+    tick_rate: int = 20
+
+    # Fuel model (car simulator)
+    fuel_start_kg: float = 110.0
+    fuel_per_lap_kg: float = 1.75
+
+    # Tyre temperature model
+    tyre_ambient_temp: float = 35.0
+    tyre_optimal_temp: float = 95.0
+
+    # Safety car
+    safety_car_max_speed: float = 180.0
+
+    # WebSocket limits
+    ws_max_clients: int = 50
+    ws_heartbeat_interval_sec: int = 30
+    ws_ghost_tick_interval: int = 5
+
+    # Chat limits
+    chat_max_message_length: int = 2000
+    chat_rate_limit_per_minute: int = 30
+
+    # Telemetry history
+    telemetry_history_cap: int = 200

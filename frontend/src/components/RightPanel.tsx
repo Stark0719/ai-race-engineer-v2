@@ -1,5 +1,10 @@
+import { memo } from 'react'
 import { useRaceStore } from '../stores/raceStore'
+import { useShallow } from 'zustand/react/shallow'
 import { LineChart, Line, YAxis, ResponsiveContainer } from 'recharts'
+import { SectorComparison } from './SectorComparison'
+import { FuelPanel } from './FuelPanel'
+import { UndercutPanel } from './UndercutPanel'
 
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -10,7 +15,7 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
   )
 }
 
-function MiniChart({ data, color, min, max }: { data: number[]; color: string; min: number; max: number }) {
+const MiniChart = memo(function MiniChart({ data, color, min, max }: { data: number[]; color: string; min: number; max: number }) {
   const chartData = data.map((v, i) => ({ i, v }))
   return (
     <div className="h-11 w-full">
@@ -22,7 +27,7 @@ function MiniChart({ data, color, min, max }: { data: number[]; color: string; m
       </ResponsiveContainer>
     </div>
   )
-}
+})
 
 function DataRow({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
@@ -38,14 +43,28 @@ export function RightPanel() {
     telemetry, speedHistory, tempHistory, throttleBrakeHistory, lapTimes,
     raceDecision, raceDecisionLoading, fetchRaceDecision,
     bestLapTime, lastLapSectors, lastLapSectorColors,
-  } = useRaceStore()
+    focusedDriver,
+  } = useRaceStore(useShallow((s) => ({
+    telemetry: s.telemetry,
+    speedHistory: s.speedHistory,
+    tempHistory: s.tempHistory,
+    throttleBrakeHistory: s.throttleBrakeHistory,
+    lapTimes: s.lapTimes,
+    raceDecision: s.raceDecision,
+    raceDecisionLoading: s.raceDecisionLoading,
+    fetchRaceDecision: s.fetchRaceDecision,
+    bestLapTime: s.bestLapTime,
+    lastLapSectors: s.lastLapSectors,
+    lastLapSectorColors: s.lastLapSectorColors,
+    focusedDriver: s.focusedDriver,
+  })))
 
   const tyreColors: Record<string, string> = {
     soft: '#FF3333', medium: '#FFD700', hard: '#CCCCCC',
   }
 
   return (
-    <div className="w-[320px] shrink-0 bg-panel border-l border-border overflow-y-auto">
+    <div className="w-full md:w-[320px] md:shrink-0 bg-panel border-l border-border overflow-y-auto">
       <Panel title="🧠 Race Decision">
         <div className="flex justify-end mb-1">
           <button
@@ -112,6 +131,14 @@ export function RightPanel() {
         )}
       </Panel>
 
+      <Panel title="🔄 Undercut / Overcut">
+        <UndercutPanel />
+      </Panel>
+
+      <Panel title="⛽ Fuel Strategy">
+        <FuelPanel />
+      </Panel>
+
       <Panel title="📊 Live Telemetry">
         {telemetry ? (
           <>
@@ -150,6 +177,12 @@ export function RightPanel() {
           />
         </div>
       </Panel>
+
+      {focusedDriver && (
+        <Panel title={`vs ${focusedDriver} Sectors`}>
+          <SectorComparison />
+        </Panel>
+      )}
 
       <Panel title="Speed Trace">
         {speedHistory.length > 1 ? (

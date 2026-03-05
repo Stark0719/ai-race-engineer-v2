@@ -1,11 +1,56 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useCallback } from 'react'
 import { useRaceStore } from '../../stores/raceStore'
+
+// Team color mapping (same as GhostCars.tsx)
+const TEAM_COLORS: Record<string, string> = {
+  'Red Bull Racing': '#3671C6',
+  'Red Bull': '#3671C6',
+  'Ferrari': '#E8002D',
+  'Scuderia Ferrari': '#E8002D',
+  'Mercedes': '#27F4D2',
+  'McLaren': '#FF8000',
+  'Aston Martin': '#229971',
+  'Alpine': '#FF87BC',
+  'Alpine F1 Team': '#FF87BC',
+  'Williams': '#64C4FF',
+  'RB': '#6692FF',
+  'AlphaTauri': '#6692FF',
+  'Haas F1 Team': '#B6BABD',
+  'Haas': '#B6BABD',
+  'Kick Sauber': '#52E252',
+  'Alfa Romeo': '#52E252',
+  'Sauber': '#52E252',
+}
+
+function getTeamColor(team: string): string {
+  if (TEAM_COLORS[team]) return TEAM_COLORS[team]
+  const lower = team.toLowerCase()
+  for (const [key, color] of Object.entries(TEAM_COLORS)) {
+    if (lower.includes(key.toLowerCase()) || key.toLowerCase().includes(lower)) {
+      return color
+    }
+  }
+  return '#888888'
+}
+
+// Store transform params for click handling
+let _transform: {
+  ox: number; oy: number; scale: number; w: number; h: number
+} | null = null
 
 export function TrackMap() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const {
     currentTrack, telemetry, lastLapSectorColors,
+    carPositions, replayDrivers, focusedDriver, setFocusedDriver,
+    replayDriver, multiCarEnabled,
   } = useRaceStore()
+
+  // Build team lookup
+  const teamMap: Record<string, string> = {}
+  for (const d of replayDrivers) {
+    teamMap[d.abbreviation] = d.team
+  }
 
   useEffect(() => {
     const cv = canvasRef.current
@@ -28,6 +73,7 @@ export function TrackMap() {
       ctx.fillStyle = '#555'
       ctx.font = '11px monospace'
       ctx.fillText('No track data — run extract_tracks.py', 10, 20)
+      _transform = null
       return
     }
 
@@ -45,8 +91,16 @@ export function TrackMap() {
     const oy = (minY + maxY) / 2
     const scale = Math.min(w, h) / range
 
-    const tx = (p: [number, number]) => (p[0] - ox) * scale + w / 2
-    const ty = (p: [number, number]) => -(p[1] - oy) * scale + h / 2
+    _transform = { ox, oy, scale, w, h }
+
+    const tx = (p: [number, number] | { x: number; y: number }) => {
+      const x = Array.isArray(p) ? p[0] : p.x
+      return (x - ox) * scale + w / 2
+    }
+    const ty = (p: [number, number] | { x: number; y: number }) => {
+      const y = Array.isArray(p) ? p[1] : p.y
+      return -(y - oy) * scale + h / 2
+    }
 
     // Track surface fill
     ctx.fillStyle = '#12122a'
@@ -67,7 +121,7 @@ export function TrackMap() {
     ctx.closePath()
     ctx.stroke()
 
-    // Sector colored overlays (F1-like theme)
+    // Sector colored overlays
     if (currentTrack.sector_boundaries && currentTrack.sector_boundaries.length >= 4) {
       const b1 = Math.floor(currentTrack.sector_boundaries[1] * (pts.length - 1))
       const b2 = Math.floor(currentTrack.sector_boundaries[2] * (pts.length - 1))
@@ -100,7 +154,7 @@ export function TrackMap() {
         ctx.stroke()
       }
 
-      // Sector labels near each segment center
+      // Sector labels
       const mids = [Math.floor(b1 * 0.5), Math.floor((b1 + b2) * 0.5), Math.floor((b2 + pts.length - 1) * 0.5)]
       ctx.font = '9px monospace'
       ctx.fillStyle = '#d1d5db'
@@ -109,7 +163,6 @@ export function TrackMap() {
         ctx.fillText(`S${idx + 1}`, tx(p) + 5, ty(p) - 5)
       })
     } else {
-      // Fallback single red outline
       ctx.strokeStyle = '#e10600'
       ctx.lineWidth = 2.8
       ctx.beginPath()
@@ -170,28 +223,112 @@ export function TrackMap() {
       ctx.restore()
     }
 
-    // Car position
+    // ---- Ghost car dots ----
+    if (multiCarEnabled && carPositions) {
+      for (const [abbrev, pos] of Object.entries(carPositions)) {
+        const team = teamMap[abbrev] || ''
+        const color = getTeamColor(team)
+        const isFocused = focusedDriver === abbrev
+        const cx = tx({ x: pos.x, y: pos.y })
+        const cy = ty({ x: pos.x, y: pos.y })
+
+        // Dot
+        ctx.fillStyle = color
+        ctx.globalAlpha = isFocused ? 1.0 : 0.75
+        ctx.beginPath()
+        ctx.arc(cx, cy, isFocused ? 4.5 : 3, 0, Math.PI * 2)
+        ctx.fill()
+
+        if (isFocused) {
+          // Focused ring
+          ctx.strokeStyle = '#ffffff'
+          ctx.lineWidth = 1.5
+          ctx.stroke()
+        }
+
+        // Label
+        ctx.globalAlpha = isFocused ? 1.0 : 0.6
+        ctx.fillStyle = '#ffffff'
+        ctx.font = `${isFocused ? 'bold ' : ''}7px monospace`
+        ctx.fillText(abbrev, cx + 5, cy - 3)
+        ctx.globalAlpha = 1.0
+      }
+    }
+
+    // ---- Focused driver car position (main replay driver) ----
     if (telemetry) {
-      const carPt: [number, number] = [telemetry.x, telemetry.y]
+      const isMainFocused = !focusedDriver
+      const carPt = { x: telemetry.x, y: telemetry.y }
       const colors: Record<string, string> = {
         soft: '#FF3333', medium: '#FFD700', hard: '#CCCCCC',
       }
       ctx.fillStyle = colors[telemetry.tyre_compound] || '#00ff00'
       ctx.beginPath()
-      ctx.arc(tx(carPt), ty(carPt), 5, 0, Math.PI * 2)
+      ctx.arc(tx(carPt), ty(carPt), isMainFocused ? 5 : 3.5, 0, Math.PI * 2)
       ctx.fill()
-      ctx.strokeStyle = '#fff'
-      ctx.lineWidth = 1.5
+      ctx.strokeStyle = isMainFocused ? '#fff' : 'rgba(255,255,255,0.5)'
+      ctx.lineWidth = isMainFocused ? 1.5 : 1
       ctx.stroke()
+
+      if (isMainFocused) {
+        ctx.fillStyle = '#ffffff'
+        ctx.font = 'bold 7px monospace'
+        ctx.fillText(replayDriver || 'CAR', tx(carPt) + 6, ty(carPt) - 3)
+      }
     }
 
-  }, [currentTrack, telemetry, lastLapSectorColors])
+  }, [currentTrack, telemetry, lastLapSectorColors, carPositions, focusedDriver, multiCarEnabled, replayDriver, teamMap])
+
+  // Click handler to select a driver dot
+  const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!_transform || !carPositions) return
+    const cv = canvasRef.current
+    if (!cv) return
+    const rect = cv.getBoundingClientRect()
+    const clickX = e.clientX - rect.left
+    const clickY = e.clientY - rect.top
+    const { ox, oy, scale, w, h } = _transform
+
+    const txP = (x: number) => (x - ox) * scale + w / 2
+    const tyP = (y: number) => -(y - oy) * scale + h / 2
+
+    let closestDriver: string | null = null
+    let closestDist = Infinity
+
+    // Check ghost cars
+    for (const [abbrev, pos] of Object.entries(carPositions)) {
+      const dx = txP(pos.x) - clickX
+      const dy = tyP(pos.y) - clickY
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      if (dist < closestDist && dist < 12) {
+        closestDist = dist
+        closestDriver = abbrev
+      }
+    }
+
+    // Check main car
+    const telState = useRaceStore.getState().telemetry
+    if (telState) {
+      const dx = txP(telState.x) - clickX
+      const dy = tyP(telState.y) - clickY
+      const dist = Math.sqrt(dx * dx + dy * dy)
+      if (dist < closestDist && dist < 12) {
+        closestDriver = null // null = main car
+        closestDist = dist
+      }
+    }
+
+    if (closestDist < 12) {
+      setFocusedDriver(closestDriver)
+    }
+  }, [carPositions, setFocusedDriver])
 
   return (
     <canvas
       ref={canvasRef}
-      className="w-full rounded"
+      className="w-full rounded cursor-pointer"
       style={{ height: '180px', background: '#080810' }}
+      onClick={handleClick}
     />
   )
 }

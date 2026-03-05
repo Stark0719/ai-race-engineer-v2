@@ -1,6 +1,8 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, memo } from 'react'
 import { useRaceStore } from '../stores/raceStore'
+import { useShallow } from 'zustand/react/shallow'
 import { TrackMap } from './track/TrackMap'
+import { SessionBrowser } from './SessionBrowser'
 
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -11,8 +13,10 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
   )
 }
 
-function StrategyPanel() {
-  const { runStrategy, strategyResult, strategyLoading, currentTrack } = useRaceStore()
+const StrategyPanel = memo(function StrategyPanel() {
+  const { runStrategy, strategyResult, strategyLoading, currentTrack } = useRaceStore(useShallow((s) => ({
+    runStrategy: s.runStrategy, strategyResult: s.strategyResult, strategyLoading: s.strategyLoading, currentTrack: s.currentTrack,
+  })))
   const [pitLoss, setPitLoss] = useState(20)
   const [scProb, setScProb] = useState(20)
   const [iters, setIters] = useState(300)
@@ -69,10 +73,12 @@ function StrategyPanel() {
       )}
     </>
   )
-}
+})
 
-function ChatPanel() {
-  const { chatMessages, chatLoading, sendChat } = useRaceStore()
+const ChatPanel = memo(function ChatPanel() {
+  const { chatMessages, chatLoading, sendChat } = useRaceStore(useShallow((s) => ({
+    chatMessages: s.chatMessages, chatLoading: s.chatLoading, sendChat: s.sendChat,
+  })))
   const [input, setInput] = useState('')
 
   const handleSend = () => {
@@ -110,16 +116,155 @@ function ChatPanel() {
       </div>
     </>
   )
+})
+
+// Team color mapping (same as GhostCars)
+const TEAM_COLORS: Record<string, string> = {
+  'Red Bull Racing': '#3671C6', 'Red Bull': '#3671C6',
+  'Ferrari': '#E8002D', 'Scuderia Ferrari': '#E8002D',
+  'Mercedes': '#27F4D2', 'McLaren': '#FF8000',
+  'Aston Martin': '#229971',
+  'Alpine': '#FF87BC', 'Alpine F1 Team': '#FF87BC',
+  'Williams': '#64C4FF',
+  'RB': '#6692FF', 'AlphaTauri': '#6692FF',
+  'Haas F1 Team': '#B6BABD', 'Haas': '#B6BABD',
+  'Kick Sauber': '#52E252', 'Alfa Romeo': '#52E252', 'Sauber': '#52E252',
 }
 
+function getTeamColor(team: string): string {
+  if (TEAM_COLORS[team]) return TEAM_COLORS[team]
+  const lower = team.toLowerCase()
+  for (const [key, color] of Object.entries(TEAM_COLORS)) {
+    if (lower.includes(key.toLowerCase()) || key.toLowerCase().includes(lower)) return color
+  }
+  return '#888888'
+}
+
+const DriverListPanel = memo(function DriverListPanel() {
+  const {
+    carPositions, replayDrivers, replayDriver,
+    focusedDriver, setFocusedDriver, telemetry, timingGaps,
+  } = useRaceStore(useShallow((s) => ({
+    carPositions: s.carPositions, replayDrivers: s.replayDrivers, replayDriver: s.replayDriver,
+    focusedDriver: s.focusedDriver, setFocusedDriver: s.setFocusedDriver, telemetry: s.telemetry, timingGaps: s.timingGaps,
+  })))
+
+  if (!carPositions) return null
+
+  // Build sorted driver list: main driver + ghosts sorted by position
+  type DriverEntry = { abbrev: string; team: string; position: number; isMain: boolean; speed: number }
+  const entries: DriverEntry[] = []
+
+  // Add main replay driver
+  if (telemetry) {
+    const mainDrv = replayDrivers.find((d) => d.abbreviation === replayDriver)
+    entries.push({
+      abbrev: replayDriver,
+      team: mainDrv?.team || '',
+      position: telemetry.position,
+      isMain: true,
+      speed: Math.round(telemetry.speed_kph),
+    })
+  }
+
+  // Add ghost drivers
+  for (const [abbrev, pos] of Object.entries(carPositions)) {
+    const drv = replayDrivers.find((d) => d.abbreviation === abbrev)
+    entries.push({
+      abbrev,
+      team: drv?.team || '',
+      position: pos.position,
+      isMain: false,
+      speed: Math.round(pos.speed_kph),
+    })
+  }
+
+  entries.sort((a, b) => a.position - b.position)
+
+  const isFocused = (abbrev: string, isMain: boolean) => {
+    if (isMain) return !focusedDriver
+    return focusedDriver === abbrev
+  }
+
+  // Build gap lookup from timing data
+  const gapMap = new Map(timingGaps.map((g) => [g.driver, g]))
+
+  const formatGap = (gap: number) => {
+    if (gap <= 0) return ''
+    return `+${gap.toFixed(1)}s`
+  }
+
+  const gapColor = (gap: number) => {
+    if (gap <= 0) return ''
+    if (gap < 1.0) return 'text-f1red'      // DRS range
+    if (gap < 3.0) return 'text-f1yellow'
+    return 'text-gray-500'
+  }
+
+  return (
+    <div className="max-h-[200px] overflow-y-auto">
+      {entries.map(({ abbrev, team, position, isMain, speed }) => {
+        const color = getTeamColor(team)
+        const focused = isFocused(abbrev, isMain)
+        const timing = gapMap.get(abbrev)
+        const gap = timing?.gap_to_leader ?? 0
+        return (
+          <button
+            key={abbrev}
+            onClick={() => setFocusedDriver(isMain ? null : abbrev)}
+            className={`w-full flex items-center gap-1.5 px-1.5 py-[3px] text-left transition-colors ${
+              focused ? 'bg-white/10' : 'hover:bg-white/5'
+            }`}
+          >
+            {/* Position */}
+            <span className="text-[9px] text-gray-500 w-4 text-right font-mono">
+              {position}
+            </span>
+            {/* Team color bar */}
+            <span
+              className="w-[3px] h-3 rounded-sm shrink-0"
+              style={{ background: color }}
+            />
+            {/* Abbreviation */}
+            <span className={`text-[10px] font-bold w-8 ${focused ? 'text-white' : 'text-gray-300'}`}>
+              {abbrev}
+            </span>
+            {/* Gap to leader */}
+            <span className={`text-[8px] font-mono w-12 text-right ${gapColor(gap)}`}>
+              {position === 1 ? 'LEADER' : formatGap(gap)}
+            </span>
+            {/* Speed */}
+            <span className="text-[8px] text-gray-500 font-mono w-8 text-right">
+              {speed}
+            </span>
+            {/* Focus indicator */}
+            {focused && (
+              <span className="w-1.5 h-1.5 rounded-full bg-f1cyan shrink-0" />
+            )}
+          </button>
+        )
+      })}
+    </div>
+  )
+})
+
 export function LeftPanel() {
-  const { currentTrack, telemetry, totalLaps, bestLapTime, lastLapSectors, lastLapSectorColors } = useRaceStore()
+  const {
+    currentTrack, telemetry, totalLaps, bestLapTime, lastLapSectors, lastLapSectorColors,
+    multiCarEnabled, carPositions,
+  } = useRaceStore(useShallow((s) => ({
+    currentTrack: s.currentTrack, telemetry: s.telemetry, totalLaps: s.totalLaps,
+    bestLapTime: s.bestLapTime, lastLapSectors: s.lastLapSectors, lastLapSectorColors: s.lastLapSectorColors,
+    multiCarEnabled: s.multiCarEnabled, carPositions: s.carPositions,
+  })))
   const sectorColor = (c: 'purple' | 'yellow' | 'none') => (
     c === 'purple' ? '#b388ff' : c === 'yellow' ? '#ffd54f' : '#9ca3af'
   )
 
+  const showDriverList = multiCarEnabled && carPositions
+
   return (
-    <div className="w-[280px] shrink-0 bg-panel border-r border-border overflow-y-auto">
+    <div className="w-full md:w-[280px] md:shrink-0 bg-panel border-r border-border overflow-y-auto">
       <Panel title="📍 Circuit Map">
         <TrackMap />
         <div className="text-[9px] mt-1 bg-panel2 rounded px-1.5 py-1">
@@ -144,12 +289,22 @@ export function LeftPanel() {
         )}
       </Panel>
 
+      {showDriverList && (
+        <Panel title="🏎 Drivers">
+          <DriverListPanel />
+        </Panel>
+      )}
+
       <Panel title="🎲 Strategy Simulation">
         <StrategyPanel />
       </Panel>
 
       <Panel title="💬 AI Race Engineer">
         <ChatPanel />
+      </Panel>
+
+      <Panel title="💾 Sessions">
+        <SessionBrowser />
       </Panel>
 
       <Panel title="🔮 Pit Window">

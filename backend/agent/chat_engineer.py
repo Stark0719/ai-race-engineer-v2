@@ -2,13 +2,15 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import json
 import re
+import os
+from pathlib import Path
 from typing import Any, Dict
 
 from backend.agent.tools import strategy_tool, racing_line_tool
 from backend.agent.rag import retrieve_context
 
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 client = OpenAI()
 
 

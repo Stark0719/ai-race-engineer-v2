@@ -58,8 +58,8 @@ class LiveCarSimulator:
         self.tyre_age_laps = 0
         self.tyre_wear = 0.0
         self.tyre_temp = 70.0
-        self.fuel_kg = 110.0
-        self.fuel_per_lap_kg = 1.75
+        self.fuel_kg = self.config.fuel_start_kg
+        self.fuel_per_lap_kg = self.config.fuel_per_lap_kg
         self.lap_number = 1
         self.lap_fraction = 0.0
         self.total_race_time = 0.0
@@ -87,17 +87,17 @@ class LiveCarSimulator:
         return linear + cliff
 
     def _fuel_time_benefit(self) -> float:
-        return (110.0 - self.fuel_kg) * self.config.fuel_effect
+        return (self.config.fuel_start_kg - self.fuel_kg) * self.config.fuel_effect
 
     def _update_tyre_temp(self, speed: float, real_dt: float):
-        ambient = 35.0
+        ambient = self.config.tyre_ambient_temp
         heat = (speed / 300.0) * 3.0
         cool = (self.tyre_temp - ambient) * 0.04
         self.tyre_temp += (heat - cool) * real_dt
         self.tyre_temp = float(np.clip(self.tyre_temp, ambient, 130.0))
 
     def _tyre_temp_factor(self) -> float:
-        diff = abs(self.tyre_temp - 95.0)
+        diff = abs(self.tyre_temp - self.config.tyre_optimal_temp)
         return 0.0 if diff < 15 else (diff - 15) * 0.01
 
     def _predicted_lap_time(self) -> float:
@@ -117,9 +117,9 @@ class LiveCarSimulator:
         base = self.track.interpolate_speed(frac)
         df = self._tyre_degradation_factor()
         speed = base * (1.0 - df * (0.003 if base < 200 else 0.001))
-        speed *= (1.0 + (110.0 - self.fuel_kg) * 0.0003)
+        speed *= (1.0 + (self.config.fuel_start_kg - self.fuel_kg) * 0.0003)
         if self.safety_car:
-            speed = min(speed, 180.0)
+            speed = min(speed, self.config.safety_car_max_speed)
         return max(50.0, speed * random.uniform(0.98, 1.02))
 
     def _gear(self, s): return min(8, max(1, int(s / 42)))

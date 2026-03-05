@@ -143,12 +143,104 @@ export interface LapTime {
 // WebSocket message types
 export type WSMessage =
   | { type: 'track_info'; name: string; country: string; total_laps: number; waypoints_xy: [number, number][]; track_width: number }
-  | TelemetryFrame
+  | (TelemetryFrame & { cars?: Record<string, CarPosition>; timing?: TimingGap[] })
   | { type: 'race_finished'; total_laps: number; total_time: number; pit_history: any[] }
   | { type: 'race_stopped' }
+  | { type: 'drivers_info'; drivers: F1DriverInfo[] }
 
 // Race state
 export type RaceStatus = 'idle' | 'running' | 'finished' | 'stopped' | 'error'
 
 // Camera mode
-export type CameraMode = 'orbit' | 'visor' | 'tv' | 'top'
+export type CameraMode = 'onboard' | 'tcam' | 'chase' | 'tv' | 'rear' | 'orbit'
+
+// App mode
+export type AppMode = 'sim' | 'replay'
+
+// FastF1 schedule event
+export interface F1Event {
+  round: number
+  name: string
+  country: string
+  location: string
+  date: string
+  track_key: string | null
+}
+
+// FastF1 driver info
+export interface F1DriverInfo {
+  number: number
+  abbreviation: string
+  name: string
+  team: string
+}
+
+// Ghost car position (4 Hz from multi-car replay)
+export interface CarPosition {
+  total_race_time: number
+  x: number
+  y: number
+  heading: number
+  lap_fraction: number
+  lap_number: number
+  speed_kph: number
+  position: number
+  tyre_compound: string
+  in_pit: boolean
+  last_lap_time?: number
+  sector_1_time?: number
+  sector_2_time?: number
+  sector_3_time?: number
+}
+
+// Timing gap between drivers
+export interface TimingGap {
+  driver: string
+  position: number
+  gap_to_leader: number
+  gap_to_ahead: number
+  lap_number: number
+  last_lap_time: number
+}
+
+// Sector comparison between two drivers
+export interface SectorComparison {
+  focused_driver: string
+  target_driver: string
+  focused: { s1: number; s2: number; s3: number }
+  target: { s1: number; s2: number; s3: number }
+  delta: { s1: number; s2: number; s3: number }
+}
+
+// Undercut/overcut opportunity
+export interface UndercutOpportunity {
+  rival: string
+  type: 'undercut' | 'overcut'
+  viable: boolean
+  net_gain_seconds: number
+  optimal_pit_lap?: number
+  confidence: number
+}
+
+// Saved session summary
+export interface SavedSessionSummary {
+  id: string
+  timestamp: string
+  track: string
+  driver: string
+  mode: string
+  total_laps: number
+  total_time: number
+  best_lap?: number
+}
+
+// Post-race analytics
+export interface PostRaceAnalytics {
+  lap_times: LapTime[]
+  stint_summary: Array<{ compound: string; laps: number; avg_time: number; best_time: number; worst_time: number }>
+  degradation_curve: Array<{ stint: number; compound: string; slope: number }>
+  total_time: number
+  pit_history: Array<{ lap: number; compound: string }>
+  consistency_score: number
+  sector_evolution: Array<{ lap: number; s1: number; s2: number; s3: number }>
+}

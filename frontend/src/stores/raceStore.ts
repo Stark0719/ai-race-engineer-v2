@@ -1,7 +1,8 @@
 import { create } from 'zustand'
 import type {
   TrackData, TelemetryFrame, StrategyResult, LapTime, RaceDecisionPayload,
-  RaceStatus, CameraMode,
+  RaceStatus, CameraMode, AppMode, F1Event, F1DriverInfo, CarPosition,
+  TimingGap, UndercutOpportunity, SavedSessionSummary, PostRaceAnalytics,
 } from '../types'
 
 const API = '' // Vite proxy handles /api -> localhost:8000
@@ -49,6 +50,43 @@ interface RaceStore {
   // Errors
   error: string | null
 
+  // Replay
+  mode: AppMode
+  replayYear: number
+  replaySchedule: F1Event[]
+  replayGP: string
+  replaySessionType: string
+  replayDrivers: F1DriverInfo[]
+  replayDriver: string
+  sessionLoading: boolean
+  sessionLoaded: boolean
+
+  // Multi-car
+  multiCarEnabled: boolean
+  carPositions: Record<string, CarPosition> | null
+  replayStarting: boolean
+  focusedDriver: string | null  // null = follow main replay driver
+
+  // Timing gaps
+  timingGaps: TimingGap[]
+
+  // Undercut/overcut
+  undercutAlerts: UndercutOpportunity[]
+
+  // Audio
+  audioEnabled: boolean
+
+  // Dashboard
+  showDashboard: boolean
+  dashboardData: PostRaceAnalytics | null
+
+  // Session persistence
+  savedSessions: SavedSessionSummary[]
+
+  // WS-driven updates
+  setTrackInfo: (info: { name: string; country: string; total_laps: number; waypoints_xy: [number, number][]; track_width: number }) => void
+  setDriversInfo: (drivers: F1DriverInfo[]) => void
+
   // Actions
   loadTracks: () => Promise<void>
   loadDrivers: () => Promise<void>
@@ -70,6 +108,38 @@ interface RaceStore {
   runStrategy: (pitLoss: number, scProb: number, iterations: number) => Promise<void>
   fetchRaceDecision: () => Promise<void>
   sendChat: (message: string) => Promise<void>
+
+  // Replay actions
+  setMode: (m: AppMode) => void
+  setReplayYear: (y: number) => void
+  setReplayGP: (gp: string) => void
+  setReplaySessionType: (s: string) => void
+  loadSchedule: (year: number) => Promise<void>
+  loadReplaySession: () => Promise<void>
+  setReplayDriver: (d: string) => void
+  startReplay: () => Promise<void>
+
+  // Multi-car actions
+  setMultiCarEnabled: (v: boolean) => void
+  updateCarPositions: (positions: Record<string, CarPosition>) => void
+  setFocusedDriver: (d: string | null) => void
+
+  // Timing
+  updateTimingGaps: (gaps: TimingGap[]) => void
+
+  // Undercut
+  updateUndercutAlerts: (alerts: UndercutOpportunity[]) => void
+
+  // Audio
+  setAudioEnabled: (v: boolean) => void
+
+  // Dashboard
+  setShowDashboard: (v: boolean) => void
+  fetchDashboard: () => Promise<void>
+
+  // Session persistence
+  loadSavedSessions: () => Promise<void>
+  saveCurrentSession: () => Promise<void>
 }
 
 export const useRaceStore = create<RaceStore>((set, get) => ({
@@ -94,7 +164,7 @@ export const useRaceStore = create<RaceStore>((set, get) => ({
   sectorBest: { s1: null, s2: null, s3: null },
   lastLapSectors: { s1: null, s2: null, s3: null },
   lastLapSectorColors: { s1: 'none', s2: 'none', s3: 'none' },
-  cameraMode: 'orbit',
+  cameraMode: 'chase',
   strategyResult: null,
   strategyLoading: false,
   raceDecision: null,
@@ -102,6 +172,48 @@ export const useRaceStore = create<RaceStore>((set, get) => ({
   chatMessages: [],
   chatLoading: false,
   error: null,
+
+  // Replay initial state
+  mode: 'sim',
+  replayYear: 2024,
+  replaySchedule: [],
+  replayGP: '',
+  replaySessionType: 'R',
+  replayDrivers: [],
+  replayDriver: '',
+  sessionLoading: false,
+  sessionLoaded: false,
+
+  // Multi-car initial state
+  multiCarEnabled: true,
+  carPositions: null,
+  replayStarting: false,
+  focusedDriver: null,
+
+  // Timing gaps
+  timingGaps: [],
+
+  // Undercut/overcut
+  undercutAlerts: [],
+
+  // Audio
+  audioEnabled: false,
+
+  // Dashboard
+  showDashboard: false,
+  dashboardData: null,
+
+  // Session persistence
+  savedSessions: [],
+
+  // WS-driven updates
+  setTrackInfo: (info) => {
+    set({ totalLaps: info.total_laps })
+  },
+
+  setDriversInfo: (drivers) => {
+    set({ replayDrivers: drivers })
+  },
 
   // Load available tracks from API
   loadTracks: async () => {
@@ -202,7 +314,7 @@ export const useRaceStore = create<RaceStore>((set, get) => ({
   },
 
   stopRace: async () => {
-    set({ raceStatus: 'stopped' })
+    set({ raceStatus: 'stopped', carPositions: null, focusedDriver: null })
     try {
       await fetch('/api/race/stop', { method: 'POST' })
     } catch (err) {
@@ -223,27 +335,39 @@ export const useRaceStore = create<RaceStore>((set, get) => ({
       speedHistory, tempHistory, throttleBrakeHistory, lapTimes, telemetry,
       bestLapTime, sectorBest,
     } = get()
-    const newSpeed = [...speedHistory, frame.speed_kph].slice(-200)
-    const newTemp = [...tempHistory, frame.tyre_temp_c].slice(-200)
-    const newTB = [...throttleBrakeHistory, frame.throttle * 100 - frame.brake * 100].slice(-200)
+
+    // Ring buffer push: mutate in place then replace reference
+    // Much faster than [...arr, val].slice(-200)
+    const HISTORY_CAP = 200
+    const pushHistory = (arr: number[], val: number): number[] => {
+      if (arr.length >= HISTORY_CAP) {
+        arr.shift()
+      }
+      arr.push(val)
+      return arr
+    }
+    pushHistory(speedHistory, frame.speed_kph)
+    pushHistory(tempHistory, frame.tyre_temp_c)
+    pushHistory(throttleBrakeHistory, frame.throttle * 100 - frame.brake * 100)
 
     // Detect lap completion
-    const newLaps = [...lapTimes]
+    let newLaps = lapTimes
     let nextBestLap = bestLapTime
-    const nextSectorBest = { ...sectorBest }
+    let nextSectorBest = sectorBest
     let nextLastLapSectors = get().lastLapSectors
     let nextLastLapColors = get().lastLapSectorColors
     if (telemetry && frame.lap_number > telemetry.lap_number && frame.last_lap_time > 0) {
-      newLaps.push({
+      newLaps = [...lapTimes, {
         lap: telemetry.lap_number,
         time: frame.last_lap_time,
         compound: frame.tyre_compound,
-      })
+      }]
 
       const s1 = frame.sector_1_time > 0 ? frame.sector_1_time : null
       const s2 = frame.sector_2_time > 0 ? frame.sector_2_time : null
       const s3 = frame.sector_3_time > 0 ? frame.sector_3_time : null
       nextLastLapSectors = { s1, s2, s3 }
+      nextSectorBest = { ...sectorBest }
       const colors: { s1: 'purple' | 'yellow' | 'none'; s2: 'purple' | 'yellow' | 'none'; s3: 'purple' | 'yellow' | 'none' } = {
         s1: 'none', s2: 'none', s3: 'none',
       }
@@ -264,9 +388,9 @@ export const useRaceStore = create<RaceStore>((set, get) => ({
 
     set({
       telemetry: frame,
-      speedHistory: newSpeed,
-      tempHistory: newTemp,
-      throttleBrakeHistory: newTB,
+      speedHistory: [...speedHistory],   // new ref so subscribers see change
+      tempHistory: [...tempHistory],
+      throttleBrakeHistory: [...throttleBrakeHistory],
       lapTimes: newLaps,
       bestLapTime: nextBestLap,
       sectorBest: nextSectorBest,
@@ -342,6 +466,154 @@ export const useRaceStore = create<RaceStore>((set, get) => ({
         chatMessages: [...s.chatMessages, { role: 'assistant', text: `Error: ${err}` }],
         chatLoading: false,
       }))
+    }
+  },
+
+  // ---- Replay actions ----
+
+  setMode: (m) => {
+    const { raceStatus } = get()
+    if (raceStatus === 'running') return // can't switch while running
+    set({ mode: m, sessionLoaded: false, replayDrivers: [], replayDriver: '' })
+  },
+
+  setReplayYear: (y) => set({ replayYear: y, replaySchedule: [], replayGP: '', sessionLoaded: false, replayDrivers: [] }),
+
+  setReplayGP: (gp) => set({ replayGP: gp, sessionLoaded: false, replayDrivers: [], replayDriver: '' }),
+
+  setReplaySessionType: (s) => set({ replaySessionType: s, sessionLoaded: false, replayDrivers: [], replayDriver: '' }),
+
+  loadSchedule: async (year) => {
+    try {
+      const res = await fetch(`/api/sessions/schedule?year=${year}`)
+      const data = await res.json()
+      set({ replaySchedule: data.events || [], replayYear: year, replayGP: '' })
+    } catch (err) {
+      set({ error: `Failed to load schedule: ${err}` })
+    }
+  },
+
+  loadReplaySession: async () => {
+    const { replayYear, replayGP, replaySessionType } = get()
+    if (!replayGP) return
+    set({ sessionLoading: true, error: null })
+    try {
+      const params = new URLSearchParams({
+        year: String(replayYear),
+        gp: replayGP,
+        session_type: replaySessionType,
+      })
+      const res = await fetch(`/api/sessions/load?${params}`, { method: 'POST' })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ detail: res.statusText }))
+        set({ sessionLoading: false, error: body.detail || 'Session load failed' })
+        return
+      }
+      const data = await res.json()
+      const drivers: F1DriverInfo[] = data.drivers || []
+      // If a matching track exists, select it
+      if (data.track_key) {
+        const tracks = get().tracks
+        if (tracks[data.track_key]) {
+          get().selectTrack(data.track_key)
+        }
+      }
+      set({
+        replayDrivers: drivers,
+        replayDriver: drivers[0]?.abbreviation || '',
+        sessionLoaded: true,
+        sessionLoading: false,
+        totalLaps: data.total_laps || 0,
+      })
+    } catch (err) {
+      set({ sessionLoading: false, error: `Session load failed: ${err}` })
+    }
+  },
+
+  setReplayDriver: (d) => set({ replayDriver: d }),
+
+  // Multi-car actions
+  setMultiCarEnabled: (v) => set({ multiCarEnabled: v }),
+  updateCarPositions: (positions) => set({ carPositions: positions }),
+  setFocusedDriver: (d) => set({ focusedDriver: d }),
+
+  // Timing
+  updateTimingGaps: (gaps) => set({ timingGaps: gaps }),
+
+  // Undercut
+  updateUndercutAlerts: (alerts) => set({ undercutAlerts: alerts }),
+
+  // Audio
+  setAudioEnabled: (v) => set({ audioEnabled: v }),
+
+  // Dashboard
+  setShowDashboard: (v) => set({ showDashboard: v }),
+  fetchDashboard: async () => {
+    try {
+      const res = await fetch('/api/analytics/post-race')
+      if (!res.ok) return
+      const data = await res.json()
+      set({ dashboardData: data, showDashboard: true })
+    } catch (err) {
+      console.error('Failed to fetch dashboard:', err)
+    }
+  },
+
+  // Session persistence
+  loadSavedSessions: async () => {
+    try {
+      const res = await fetch('/api/sessions/saved')
+      const data = await res.json()
+      set({ savedSessions: data.sessions || [] })
+    } catch (err) {
+      console.error('Failed to load sessions:', err)
+    }
+  },
+
+  saveCurrentSession: async () => {
+    try {
+      await fetch('/api/sessions/save', { method: 'POST' })
+    } catch (err) {
+      console.error('Failed to save session:', err)
+    }
+  },
+
+  startReplay: async () => {
+    const { replayYear, replayGP, replaySessionType, replayDriver, speedMultiplier, multiCarEnabled } = get()
+    if (!replayGP || !replayDriver) return
+    set({ error: null, carPositions: null, replayStarting: true })
+    try {
+      const params = new URLSearchParams({
+        year: String(replayYear),
+        gp: replayGP,
+        session_type: replaySessionType,
+        driver: replayDriver,
+        speed: String(speedMultiplier),
+        multi_car: String(multiCarEnabled),
+      })
+      const res = await fetch(`/api/race/start-replay?${params}`, { method: 'POST' })
+      const data = await res.json()
+      if (data.error) {
+        set({ error: data.error, replayStarting: false })
+        return
+      }
+      set({
+        raceStatus: 'running',
+        replayStarting: false,
+        totalLaps: data.total_laps || get().totalLaps,
+        speedHistory: [],
+        tempHistory: [],
+        throttleBrakeHistory: [],
+        lapTimes: [],
+        bestLapTime: null,
+        sectorBest: { s1: null, s2: null, s3: null },
+        lastLapSectors: { s1: null, s2: null, s3: null },
+        lastLapSectorColors: { s1: 'none', s2: 'none', s3: 'none' },
+        telemetry: null,
+        error: null,
+      })
+    } catch (err) {
+      set({ error: `Failed to start replay: ${err}`, replayStarting: false })
     }
   },
 }))

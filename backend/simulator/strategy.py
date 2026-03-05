@@ -14,6 +14,7 @@ from typing import Optional
 import numpy as np
 
 from backend.simulator.config import COMPOUNDS, SimulationConfig
+from backend.simulator.weather import WeatherConfig, WeatherModel, WeatherState
 
 
 def _stint_times(
@@ -39,6 +40,102 @@ def _stint_times(
     fuel_benefit = config.fuel_effect * np.maximum(0.0, race_laps - 1)
 
     return base_lap_time + c["pace_offset"] + pace_noise + degradation + warmup - fuel_benefit
+
+
+def fuel_adjusted_lap_time(
+    base_time: float,
+    lap: int,
+    total_laps: int,
+    fuel_start_kg: float = 110.0,
+    fuel_per_lap_kg: float = 1.75,
+    fuel_weight_penalty: float = 0.035,
+) -> float:
+    """
+    Compute lap time penalty from fuel weight.
+
+    F1 cars lose ~0.035s per kg of fuel. A full 110kg tank adds ~3.85s
+    to lap time at race start, decreasing linearly as fuel burns.
+    """
+    fuel_remaining = max(0.0, fuel_start_kg - lap * fuel_per_lap_kg)
+    return base_time + fuel_remaining * fuel_weight_penalty
+
+
+def compute_fuel_curve(
+    total_laps: int,
+    base_lap_time: float,
+    fuel_start_kg: float = 110.0,
+    fuel_per_lap_kg: float = 1.75,
+    fuel_weight_penalty: float = 0.035,
+) -> list[dict]:
+    """Generate per-lap fuel data: mass, weight penalty, adjusted lap time."""
+    curve = []
+    for lap in range(1, total_laps + 1):
+        fuel_remaining = max(0.0, fuel_start_kg - lap * fuel_per_lap_kg)
+        penalty = fuel_remaining * fuel_weight_penalty
+        curve.append({
+            "lap": lap,
+            "fuel_remaining_kg": round(fuel_remaining, 2),
+            "fuel_penalty_seconds": round(penalty, 3),
+            "adjusted_lap_time": round(base_lap_time + penalty, 3),
+        })
+    return curve
+
+
+def compute_fuel_adjusted_pit_window(
+    total_laps: int,
+    base_lap_time: float,
+    pit_loss_time: float,
+    compound_1: str = "medium",
+    compound_2: str = "hard",
+    config: SimulationConfig | None = None,
+    compounds: dict = COMPOUNDS,
+    fuel_start_kg: float = 110.0,
+    fuel_per_lap_kg: float = 1.75,
+) -> dict:
+    """
+    Find optimal pit lap accounting for fuel weight effect on tyre degradation.
+
+    Heavier fuel load means more energy through tyres, accelerating wear.
+    This shifts the optimal pit window slightly earlier than a fuel-agnostic model.
+    """
+    if config is None:
+        config = SimulationConfig()
+
+    fuel_factor = 0.035  # seconds per kg
+    best_time = np.inf
+    best_pit = config.min_stint_length
+    min_stint = config.min_stint_length
+
+    for pit_lap in range(min_stint, total_laps - min_stint + 1):
+        total_time = 0.0
+
+        for lap in range(1, pit_lap + 1):
+            fuel_remaining = max(0.0, fuel_start_kg - lap * fuel_per_lap_kg)
+            lap_time = base_lap_time + compounds[compound_1]["pace_offset"]
+            lap_time += compounds[compound_1]["deg"] * lap
+            lap_time += fuel_remaining * fuel_factor
+            total_time += lap_time
+
+        total_time += pit_loss_time
+
+        for lap_idx, lap in enumerate(range(pit_lap + 1, total_laps + 1)):
+            age = lap_idx + 1
+            fuel_remaining = max(0.0, fuel_start_kg - lap * fuel_per_lap_kg)
+            lap_time = base_lap_time + compounds[compound_2]["pace_offset"]
+            lap_time += compounds[compound_2]["deg"] * age
+            lap_time += fuel_remaining * fuel_factor
+            total_time += lap_time
+
+        if total_time < best_time:
+            best_time = total_time
+            best_pit = pit_lap
+
+    return {
+        "optimal_pit_lap": best_pit,
+        "total_time": round(best_time, 2),
+        "compound_1": compound_1,
+        "compound_2": compound_2,
+    }
 
 
 def _effective_pit_loss(
@@ -366,3 +463,179 @@ def recommend_strategy(
             "pit_window_distribution",
         ],
     }
+
+
+def _is_wet_compound(compound: str) -> bool:
+    return compound in ("intermediate", "wet")
+
+
+def _weather_lap_penalty(
+    compound: str,
+    rain_intensity: float,
+    grip_multiplier: float,
+    base_lap_time: float,
+    compounds: dict,
+) -> float:
+    """Compute pace penalty from weather/compound mismatch."""
+    comp_data = compounds.get(compound, {})
+    if _is_wet_compound(compound):
+        if rain_intensity < 0.1:
+            return comp_data.get("dry_overheat_penalty", 2.5)
+        return 0.0
+    else:
+        if rain_intensity > 0.1:
+            return (1.0 - grip_multiplier) * base_lap_time * 0.08
+        return 0.0
+
+
+def recommend_strategy_with_weather(
+    iterations: int,
+    total_laps: int,
+    base_lap_time: float,
+    pit_loss_time: float,
+    weather_config: WeatherConfig,
+    config: SimulationConfig | None = None,
+    compounds: dict = COMPOUNDS,
+    seed: Optional[int] = None,
+    safety_car_prob: float = 0.2,
+) -> dict:
+    """
+    Weather-aware Monte Carlo strategy.
+
+    If rain_probability_per_lap is 0, delegates to the standard recommend_strategy.
+    Otherwise, runs per-lap weather simulation and evaluates both dry and wet
+    compound strategies.
+    """
+    if weather_config.rain_probability_per_lap <= 0.0:
+        return recommend_strategy(
+            iterations=iterations,
+            total_laps=total_laps,
+            base_lap_time=base_lap_time,
+            pit_loss_time=pit_loss_time,
+            one_stop_compounds=("medium", "hard"),
+            two_stop_compounds=("soft", "medium", "hard"),
+            safety_car_prob=safety_car_prob,
+            config=config,
+            compounds=compounds,
+            seed=seed,
+        )
+
+    if config is None:
+        config = SimulationConfig()
+
+    rng = np.random.default_rng(seed)
+
+    # Define strategy families to evaluate
+    DRY_COMPOUNDS = [c for c in ("soft", "medium", "hard") if c in compounds]
+    WET_COMPOUNDS = [c for c in ("intermediate", "wet") if c in compounds]
+
+    strategies = [
+        ("dry-1stop", [("medium", "hard")]),
+        ("dry-2stop", [("soft", "medium", "hard")]),
+    ]
+    if WET_COMPOUNDS:
+        strategies.append(("wet-1stop", [("intermediate", "hard")]))
+        strategies.append(("mixed-2stop", [("intermediate", "medium", "hard")]))
+
+    strategy_times = {name: np.zeros(iterations) for name, _ in strategies}
+    weather_rain_laps = np.zeros(iterations)
+
+    for i in range(iterations):
+        weather_seed = int(rng.integers(0, 2**31))
+        weather_model = WeatherModel(config=weather_config, seed=weather_seed)
+        timeline = weather_model.generate_timeline(total_laps)
+        rain_laps = sum(1 for s in timeline if s.rain_intensity > 0.1)
+        weather_rain_laps[i] = rain_laps
+
+        for strat_name, compound_combos in strategies:
+            best_time = np.inf
+
+            for combo in compound_combos:
+                if len(combo) == 2:
+                    # One-stop: try all pit laps
+                    min_stint = config.min_stint_length
+                    for pit_lap in range(min_stint, total_laps - min_stint + 1):
+                        total_time = 0.0
+                        for lap in range(total_laps):
+                            if lap < pit_lap:
+                                c, age = combo[0], lap + 1
+                            else:
+                                c, age = combo[1], lap - pit_lap + 1
+
+                            lap_time = base_lap_time + compounds[c]["pace_offset"]
+                            deg = compounds[c]["deg"] * age
+                            cliff = compounds[c].get("cliff_onset", 999)
+                            if age > cliff:
+                                deg += compounds[c].get("cliff_multiplier", 0) * (age - cliff) ** 2
+                            lap_time += deg
+
+                            ws = timeline[lap]
+                            lap_time += _weather_lap_penalty(c, ws.rain_intensity, ws.grip_multiplier, base_lap_time, compounds)
+                            total_time += lap_time
+
+                        total_time += pit_loss_time
+                        best_time = min(best_time, total_time)
+
+                elif len(combo) == 3:
+                    # Two-stop: simplified optimal splits
+                    min_stint = config.min_stint_length
+                    step = max(1, (total_laps - 3 * min_stint) // 8)
+                    for pit1 in range(min_stint, total_laps - 2 * min_stint + 1, step):
+                        for pit2 in range(pit1 + min_stint, total_laps - min_stint + 1, step):
+                            total_time = 0.0
+                            for lap in range(total_laps):
+                                if lap < pit1:
+                                    c, age = combo[0], lap + 1
+                                elif lap < pit2:
+                                    c, age = combo[1], lap - pit1 + 1
+                                else:
+                                    c, age = combo[2], lap - pit2 + 1
+
+                                lap_time = base_lap_time + compounds[c]["pace_offset"]
+                                deg = compounds[c]["deg"] * age
+                                cliff = compounds[c].get("cliff_onset", 999)
+                                if age > cliff:
+                                    deg += compounds[c].get("cliff_multiplier", 0) * (age - cliff) ** 2
+                                lap_time += deg
+
+                                ws = timeline[lap]
+                                lap_time += _weather_lap_penalty(c, ws.rain_intensity, ws.grip_multiplier, base_lap_time, compounds)
+                                total_time += lap_time
+
+                            total_time += 2 * pit_loss_time
+                            best_time = min(best_time, total_time)
+
+            strategy_times[strat_name][i] = best_time
+
+    # Find best strategy
+    mean_times = {name: float(np.mean(times)) for name, times in strategy_times.items()}
+    best_strat = min(mean_times, key=mean_times.get)
+
+    win_counts = {name: 0 for name in strategy_times}
+    for i in range(iterations):
+        best_in_iter = min(strategy_times, key=lambda n: strategy_times[n][i])
+        win_counts[best_in_iter] += 1
+
+    win_rates = {name: count / iterations for name, count in win_counts.items()}
+
+    result = {
+        "recommended": best_strat,
+        "confidence": round(win_rates[best_strat], 4),
+        "strategy_win_rates": {k: round(v, 4) for k, v in win_rates.items()},
+        "strategy_mean_times": {k: round(v, 2) for k, v in mean_times.items()},
+        "weather_analysis": {
+            "rain_probability": weather_config.rain_probability_per_lap,
+            "mean_rain_laps": round(float(np.mean(weather_rain_laps)), 1),
+            "rain_laps_std": round(float(np.std(weather_rain_laps)), 1),
+        },
+        "pit_loss": pit_loss_time,
+        "iterations": iterations,
+        "model_features": [
+            "weather_aware_strategy",
+            "wet_compound_analysis",
+            "rain_grip_penalty",
+            "dry_overheat_penalty",
+        ],
+    }
+
+    return result
